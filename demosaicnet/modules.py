@@ -23,25 +23,31 @@ class BayerDemosaick(nn.Module):
   other. This is not key to performance and can be ignored when training new
   models from scratch.
   """
-  def __init__(self, depth=15, width=64, pretrained=True, pad=False):
+  def __init__(self, depth=15, width=64, pretrained=True, pad=False, min_noise=0, max_noise=0, pattern="GRBG"):
     super(BayerDemosaick, self).__init__()
 
     self.depth = depth
     self.width = width
+
+    self.add_noise = (min_noise > 0 or max_noise > 0) and (min_noise < max_noise)
+    self.min_noise = min_noise
+    self.max_noise = max_noise
+    self.pattern = pattern
 
     if pad:
       pad = 1
     else:
       pad = 0
 
+    self.downsample = nn.Conv2d(3, 4, 2, stride=2)
     layers = OrderedDict([
-        ("pack_mosaic", nn.Conv2d(3, 4, 2, stride=2)),  # Downsample 2x2 to re-establish translation invariance
+        # ("pack_mosaic", nn.Conv2d(3, 4, 2, stride=2)),  # Downsample 2x2 to re-establish translation invariance
       ])
     for i in range(depth):
       n_out = width
       n_in = width
       if i == 0:
-        n_in = 4
+        n_in = 5 if self.add_noise else 4
       if i == depth-1:
         n_out = 2*width
       layers["conv{}".format(i+1)] = nn.Conv2d(n_in, n_out, 3, padding=pad)
@@ -73,9 +79,13 @@ class BayerDemosaick(nn.Module):
     Returns:
       th.Tensor: the demosaicked image
     """
+    if self.add_noise:
+      mosaic_ = self._addnoise(mosaic)
+    else:
+      mosaic_ = self.downsample(mosaic)
 
     # 1/4 resolution features
-    features = self.main_processor(mosaic)
+    features = self.main_processor(mosaic_)
     filters, masks = features[:, 0:self.width], features[:, self.width:2*self.width]
     filtered = filters * masks
     residual = self.residual_predictor(filtered)
@@ -87,6 +97,45 @@ class BayerDemosaick(nn.Module):
     packed = th.cat([cropped, upsampled], 1)  # skip connection
     output = self.fullres_processor(packed)
     return output
+
+  def _upsample(self, x):
+    sz = x.shape
+    output = th.zeros((sz[0], 3, sz[2]*2, sz[3]*2), dtype= x.dtype)
+    for c in range(3):
+      output[:, c, ::2, ::2] = x[:, 4*c, :, :]
+      output[:, c, ::2, 1::2] = x[:, 4*c+1, :, :]
+      output[:, c, 1::2, ::2] = x[:, 4*c+2, :, :]
+      output[:, c, 1::2, 1::2] = x[:, 4*c+3, :, :]
+
+    return output
+
+  # def _unpack(self, mosaic):
+  #   sz = mosaic.shape
+  #   output = th.zeros((sz[0], 3, sz[2]*2, sz[3]*2))
+  #   for c in range(4):
+  #     output[:, "RGB".index(self.pattern[c]), c//2::2, c%2::2] = mosaic[:, c, :, :]
+  #   return output
+
+  def _addnoise(self, bayer3):
+      sz = bayer3.shape
+      noise_levels = np.random.rand(sz[0])
+      noise_levels *= self.max_noise - self.min_noise
+      noise_levels += self.min_noise
+      noise = th.randn(sz)
+      for i in range(sz[0]):
+          # noise[i] = th.randn(sz[1], sz[2], sz[3]) * noise_levels[i]
+          noise[i] *= noise_levels[i]
+      mask = th.zeros_like(bayer3, dtype=bool)
+      for c in range(4):
+        mask[..., "RGB".index(self.pattern[c]), c//2::2, c%2::2] = True
+      bayer3[mask] += noise[mask]
+      mosaic_downsample = self.downsample(bayer3)
+      sz = mosaic_downsample.shape
+      sigma_layer = th.empty(sz[0], 1, sz[2], sz[3])
+      for n in range(sz[0]):
+        sigma_layer[n] = noise_levels[n]
+      mosaic_pack = th.cat((mosaic_downsample, sigma_layer), 1)
+      return mosaic_pack
 
 
 class XTransDemosaick(nn.Module):

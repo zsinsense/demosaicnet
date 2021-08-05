@@ -21,22 +21,27 @@ class PSNR(th.nn.Module):
         self.mse = th.nn.MSELoss()
     def forward(self, out, ref):
         mse = self.mse(out, ref)
-        return -10*th.log10(mse)
+        return -10*th.log10(mse+1e-12)
 
 def main(args):
     """Entrypoint to the training."""
 
     # Load model parameters from checkpoint, if any
-    meta = ttools.Checkpointer.load_meta(args.checkpoint_dir)
-    if meta is None:
-        LOG.warning("No checkpoint found at %s, aborting.", args.checkpoint_dir)
-        return
+    # meta = ttools.Checkpointer.load_meta(args.checkpoint_dir)
+    # if meta is None:
+    #     LOG.warning("No checkpoint found at %s, aborting.", args.checkpoint_dir)
+    #     return
+    meta = {
+        'mode': 'bayer',
+        'depth': 15,
+        'width': 64
+    }
 
     data = demosaicnet.Dataset(args.data, download=False,
                                mode=meta["mode"],
                                subset=demosaicnet.TEST_SUBSET)
     dataloader = DataLoader(
-        data, batch_size=1, num_workers=4, pin_memory=True, shuffle=True)
+        data, batch_size=1, num_workers=4, pin_memory=True, shuffle=False)
 
     if meta["mode"] == demosaicnet.BAYER_MODE:
         model = demosaicnet.BayerDemosaick(depth=meta["depth"],
@@ -49,8 +54,10 @@ def main(args):
                                             pretrained=True,
                                             pad=False)
 
-    checkpointer = ttools.Checkpointer(args.checkpoint_dir, model, meta=meta)
-    checkpointer.load_latest()  # Resume from checkpoint, if any.
+    # checkpointer = ttools.Checkpointer(args.checkpoint_dir, model, meta=meta)
+    # checkpointer.load_latest()  # Resume from checkpoint, if any.
+    state_dict = th.load(args.checkpoint_dir)
+    model.load_state_dict(state_dict)
 
     # No need for gradients
     for p in model.parameters():

@@ -6,7 +6,7 @@ import torch as th
 __all__ = ["bayer", "xtrans"]
 
 
-def bayer(im, return_mask=False):
+def bayer(im, return_mask=False, pattern="GRBG"):
   """Bayer mosaic.
 
   The patterned assumed is::
@@ -27,21 +27,26 @@ def bayer(im, return_mask=False):
     numpy = True
 
   if type(im) == np.ndarray:
-    mask = np.ones_like(im)
+    mask = np.zeros_like(im)
   else:
-    mask = th.ones_like(im)
+    mask = th.zeros_like(im)
 
-  # red
-  mask[..., 0, ::2, 0::2] = 0
-  mask[..., 0, 1::2, :] = 0
+  # # red
+  # mask[..., 0, ::2, 0::2] = 0
+  # mask[..., 0, 1::2, :] = 0
+  #
+  # # green
+  # mask[..., 1, ::2, 1::2] = 0
+  # mask[..., 1, 1::2, ::2] = 0
+  #
+  # # blue
+  # mask[..., 2, 0::2, :] = 0
+  # mask[..., 2, 1::2, 1::2] = 0
 
-  # green
-  mask[..., 1, ::2, 1::2] = 0
-  mask[..., 1, 1::2, ::2] = 0
-
-  # blue
-  mask[..., 2, 0::2, :] = 0
-  mask[..., 2, 1::2, 1::2] = 0
+  pattern = pattern.upper()
+  color = "RGB"
+  for chan, (y, x) in zip(pattern, [(0, 0), (0, 1), (1, 0), (1, 1)]):
+      mask[..., color.index(chan), y::2, x::2] = 1
 
   if not numpy:  # make it a constant for ONNX conversion
     mask = th.from_numpy(mask.cpu().detach().numpy()).to(im.device)

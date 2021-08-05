@@ -2,6 +2,10 @@
 """Train a demosaicking model."""
 import os
 import time
+#
+# import sys
+#
+# sys.path.append(".")
 
 import torch as th
 from torch.utils.data import DataLoader
@@ -33,45 +37,51 @@ class DemosaicnetInterface(ttools.ModelInterface):
         self.loss = th.nn.MSELoss()
         self.psnr = ttools.modules.losses.PSNR()
 
-    def forward(self, batch):
+    def training_step(self, batch):
+        # print(len(batch), type(batch[0]), len(batch[1]))
         mosaic = batch[0]
         mosaic = mosaic.to(self.device)
         output = self.model(mosaic)
-        return output
+        self.fwd_output = output
 
-    def backward(self, batch, fwd_output):
+        # backward
         target = batch[1].to(self.device)
 
         # remove boundaries to match output size
-        target = crop_like(target, fwd_output)
+        target = crop_like(target, output)
 
-        loss = self.loss(fwd_output, target)
+        loss = self.loss(output, target)
 
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
 
         with th.no_grad():
-            psnr = self.psnr(th.clamp(fwd_output, 0, 1), target)
+            psnr = self.psnr(th.clamp(output, 0, 1), target)
 
-        return {"loss": loss.item(), "psnr": psnr.item()}
+        return {'output': output, "loss": loss.item(), "psnr": psnr.item()}
 
     def init_validation(self):
         return {"count": 0, "psnr": 0}
 
-    def update_validation(self, batch, fwd_output, running_data):
+    def validation_step(self, batch, running_data):
         target = batch[1].to(self.device)
 
         # remove boundaries to match output size
-        target = crop_like(target, fwd_output)
+        target = crop_like(target, self.fwd_output)
 
         with th.no_grad():
-            psnr = self.psnr(th.clamp(fwd_output, 0, 1), target)
+            psnr = self.psnr(th.clamp(self.fwd_output, 0, 1), target)
             n = target.shape[0]
 
+        old_count = running_data["count"]
+        old_psnr = running_data["psnr"]
+        new_count = old_count + n
+        new_psnr = old_count/new_count*old_psnr + n/new_count*psnr.item()
+
         return {
-            "psnr": running_data["psnr"] + psnr.item()*n,
-            "count": running_data["count"] + n
+            "psnr": new_psnr,
+            "count": new_count
         }
 
     def finalize_validation(self, running_data):
@@ -81,7 +91,8 @@ class DemosaicnetInterface(ttools.ModelInterface):
 
 
 class ImageCallback(ttools.callbacks.ImageDisplayCallback):
-    def visualized_image(self, batch, fwd_output):
+    def visualized_image(self, batch, fwd_output, is_val=False):
+        fwd_output = fwd_output['output']
         fwd_output = fwd_output.cpu().detach()
         mosaic, target = batch
         mosaic = crop_like(mosaic.cpu().detach(), fwd_output)
@@ -91,7 +102,7 @@ class ImageCallback(ttools.callbacks.ImageDisplayCallback):
         viz = th.clamp(th.cat(vizdata, 2), 0, 1)
         return viz
 
-    def caption(self, batch, fwd_result):
+    def caption(self, batch, fwd_result, is_val=False):
         return "mosaic, ref, ours, diff"
 
 
@@ -111,7 +122,7 @@ def main(args):
 
     data = demosaicnet.Dataset(args.data, download=False,
                                mode=meta["mode"],
-                               subset=demosaicnet.TRAIN_SUBSET)
+                               subset=demosaicnet.TRAIN_SUBSET, pattern=args.pattern)
     dataloader = DataLoader(
         data, batch_size=args.bs, num_workers=args.num_worker_threads,
         pin_memory=True, shuffle=True)
@@ -120,7 +131,7 @@ def main(args):
     if args.val_data:
         val_data = demosaicnet.Dataset(args.data, download=False,
                                        mode=meta["mode"],
-                                       subset=demosaicnet.VAL_SUBSET)
+                                       subset=demosaicnet.VAL_SUBSET, pattern=args.pattern)
         val_dataloader = DataLoader(
             val_data, batch_size=args.bs, num_workers=1,
             pin_memory=True, shuffle=False)
@@ -128,12 +139,13 @@ def main(args):
     if meta["mode"] == demosaicnet.BAYER_MODE:
         model = demosaicnet.BayerDemosaick(depth=meta["depth"],
                                            width=meta["width"],
-                                           pretrained=True,
-                                           pad=False)
+                                           pretrained=False,
+                                           pad=True,
+                                           pattern=args.pattern, min_noise=0, max_noise=0)
     elif meta["mode"] == demosaicnet.XTRANS_MODE:
         model = demosaicnet.XTransDemosaick(depth=meta["depth"],
                                             width=meta["width"],
-                                            pretrained=True,
+                                            pretrained=False,
                                             pad=False)
     checkpointer = ttools.Checkpointer(
         args.checkpoint_dir, model, meta=meta)
@@ -177,6 +189,9 @@ if __name__ == "__main__":
                         choices=[demosaicnet.BAYER_MODE,
                                  demosaicnet.XTRANS_MODE],
                         help="number of features per layer.")
+    parser.add_argument("--pattern", default="GRBG",
+                        choices=["RGGB", "BGGR", "GRBG", "GBRG"],
+                        help="bayer pattern.")
     args = parser.parse_args()
     ttools.set_logger(args.debug)
     main(args)
